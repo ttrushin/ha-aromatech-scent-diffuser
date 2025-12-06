@@ -1,0 +1,33 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "AromaTech Diffuser",
+        "description": "Select your AromaTech diffuser and enter the password (default: 8888)",
+        "data": {
+          "mac": "Device",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_password": "Password must be exactly 4 digits"
+    },
+    "abort": {
+      "no_devices_found": "No AromaTech devices found. Make sure your diffuser is powered on and in range.",
+      "already_configured": "This device is already configured"
+    }
+  },
+  "entity": {
+    "switch": {
+      "power": {
+        "name": "Power"
+      }
+    },
+    "select": {
+      "intensity": {
+        "name": "Intensity"
+      }
+    }
+  }
+}
