@@ -11,8 +11,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .coordinator import AromaTechCoordinator
 from .core.const import DOMAIN
-from .core.device import Device
 from .core.entity import AromaTechEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,8 +24,8 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up AromaTech switch from a config entry."""
-    device: Device = hass.data[DOMAIN][config_entry.entry_id]
-    async_add_entities([AromaTechSwitch(device)])
+    coordinator: AromaTechCoordinator = hass.data[DOMAIN][config_entry.entry_id]
+    async_add_entities([AromaTechSwitch(coordinator)])
 
 
 class AromaTechSwitch(AromaTechEntity, SwitchEntity):
@@ -34,77 +34,64 @@ class AromaTechSwitch(AromaTechEntity, SwitchEntity):
     _attr_icon = "mdi:air-filter"
     _attr_translation_key = "power"
 
-    def __init__(self, device: Device) -> None:
+    def __init__(self, coordinator: AromaTechCoordinator) -> None:
         """Initialize the switch."""
-        super().__init__(device, "power")
-
-    def internal_update(self) -> None:
-        """Handle device state update."""
-        self._attr_is_on = self.device.is_on
-
-        if self.hass:
-            self.async_write_ha_state()
+        super().__init__(coordinator, "power")
 
     @property
     def is_on(self) -> bool:
         """Return True if the diffuser is on."""
-        return self.device.is_on
+        return self.coordinator.is_on
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
-        info = self.device.info
+        info = self.coordinator.info
+        state = self.coordinator.state
         attrs = {
-            "device_name": self.device.device_name,
+            "device_name": self.coordinator.device_name,
             "protocol_version": info.blue_version,
             "max_intensity": info.max_grade,
-            "current_intensity": self.device.intensity,
+            "current_intensity": self.coordinator.intensity,
             "oil_support": info.oil,
             "battery_support": info.battery,
             "custom_intensity_support": info.custom,
             "fan_control_support": info.fan,
             "multiple_aroma_support": info.many_aroma,
-            "connected": self.device.connected,
+            "connected": self.coordinator.connected,
         }
 
         # Add version info if available
-        if self.device.pcb_version:
-            attrs["pcb_version"] = self.device.pcb_version
-        if self.device.equipment_version:
-            attrs["equipment_version"] = self.device.equipment_version
+        if state.pcb_version:
+            attrs["pcb_version"] = state.pcb_version
+        if state.equipment_version:
+            attrs["equipment_version"] = state.equipment_version
 
         # Add connection info
-        if self.device.last_seen:
-            attrs["last_seen"] = self.device.last_seen.isoformat()
-        if self.device.rssi is not None:
-            attrs["rssi"] = self.device.rssi
+        if self.coordinator.last_seen:
+            attrs["last_seen"] = self.coordinator.last_seen.isoformat()
+        if self.coordinator.rssi is not None:
+            attrs["rssi"] = self.coordinator.rssi
 
         return attrs
 
     async def async_turn_on(self, **kwargs: Any) -> None:
-        """Turn on the diffuser."""
-        try:
-            if not await self.device.async_login():
-                raise HomeAssistantError("Failed to connect to diffuser")
+        """Turn on the diffuser.
 
-            await self.device.async_power_on(self.device.intensity)
-            _LOGGER.info("Turned on diffuser with intensity %d", self.device.intensity)
-        except Exception as e:
-            _LOGGER.error("Failed to turn on diffuser: %s", e)
-            raise HomeAssistantError(f"Failed to turn on diffuser: {e}") from e
-        finally:
-            await self.device.async_disconnect()
+        Uses the currently selected intensity from the select entity.
+        """
+        try:
+            # Use the stored intensity (set by the select entity)
+            intensity = self.coordinator.intensity
+            await self.coordinator.async_power_on(intensity)
+        except Exception as err:
+            _LOGGER.error("Failed to turn on diffuser: %s", err)
+            raise HomeAssistantError(f"Failed to turn on diffuser: {err}") from err
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn off the diffuser."""
         try:
-            if not await self.device.async_login():
-                raise HomeAssistantError("Failed to connect to diffuser")
-
-            await self.device.async_power_off()
-            _LOGGER.info("Turned off diffuser")
-        except Exception as e:
-            _LOGGER.error("Failed to turn off diffuser: %s", e)
-            raise HomeAssistantError(f"Failed to turn off diffuser: {e}") from e
-        finally:
-            await self.device.async_disconnect()
+            await self.coordinator.async_power_off()
+        except Exception as err:
+            _LOGGER.error("Failed to turn off diffuser: %s", err)
+            raise HomeAssistantError(f"Failed to turn off diffuser: {err}") from err

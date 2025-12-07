@@ -6,12 +6,16 @@
   ],
   "config_flow": true,
   "dependencies": [
+    "bluetooth",
     "bluetooth_adapters"
   ],
   "documentation": "https://github.com/ttrushin/ha-aromatech-scent-diffuser",
   "issue_tracker": "https://github.com/ttrushin/ha-aromatech-scent-diffuser/issues",
   "integration_type": "device",
-  "iot_class": "local_polling",
-  "requirements": [],
-  "version": "1.0.0"
+  "iot_class": "local_push",
+  "requirements": [
+    "bleak>=0.21.0",
+    "bleak-retry-connector>=3.0.0"
+  ],
+  "version": "1.1.0"
 }
