@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
@@ -25,13 +26,25 @@ from .core.const import (
     CMD_TIME_V2,
     CMD_TIME_V3,
     CMD_VERSION_V3,
+    DATA_BURST_TIMEOUT,
     DEFAULT_AROMA_SLOT,
     DEFAULT_INTENSITY,
     PAIR_CODE,
+    RESP_BUFFER_CLEAR,
+    RESP_DEVICE_LABEL_V3,
+    RESP_IDENTIFIER,
+    RESP_INTENSITY_PRESETS,
     RESP_LIMITS_V2,
     RESP_LIMITS_V3,
     RESP_NAME_V2,
     RESP_NAME_V3,
+    RESP_OIL_AMOUNTS_V3,
+    RESP_OIL_NAMES_V3,
+    RESP_OIL_V2,
+    RESP_PRODUCT_NAME,
+    RESP_SCHEDULE_V2,
+    RESP_SCHEDULE_V3,
+    RESP_VERSION_V3,
 )
 
 if TYPE_CHECKING:
@@ -51,6 +64,41 @@ RECONNECT_MAX_INTERVAL = 60  # Max 60 seconds between attempts
 RECONNECT_MAX_ATTEMPTS = 10  # Give up after this many consecutive failures
 
 
+@dataclass
+class OilInfo:
+    """Oil/fragrance information for a single aroma slot."""
+
+    name: str = ""
+    total: int = 0
+    remainder: int = 0
+
+    @property
+    def percentage(self) -> float:
+        """Calculate oil remaining percentage."""
+        if self.total <= 0:
+            return 0.0
+        return round((self.remainder / self.total) * 100, 1)
+
+
+@dataclass
+class Schedule:
+    """Represents a diffuser schedule slot."""
+
+    index: int = 1
+    enabled: bool = False
+    hour_on: int = 0
+    minute_on: int = 0
+    hour_off: int = 0
+    minute_off: int = 0
+    repeat_days: str = "0000000"  # 7-bit binary: Sun(MSB) to Sat(LSB)
+    intensity: int = 1
+    # V3.0 specific
+    aroma: int = 1
+    fan_enabled: bool = True
+    total_fan: bool = False
+    total_fog: bool = False
+
+
 class DeviceInfo:
     """Device capabilities discovered during login."""
 
@@ -64,6 +112,10 @@ class DeviceInfo:
         self.many_aroma: bool = False
         self.fan: bool = False
         self.max_grade: int = 5
+        self.custom_on_min: int = 0
+        self.custom_on_max: int = 0
+        self.custom_off_min: int = 0
+        self.custom_off_max: int = 0
 
 
 class DeviceState:
@@ -71,11 +123,33 @@ class DeviceState:
 
     def __init__(self) -> None:
         """Initialize device state."""
+        # Power and intensity
         self.is_on: bool = False
+        self.fan_on: bool = False
         self.intensity: int = DEFAULT_INTENSITY
+        self.active_schedule: int = 0  # Currently active schedule slot (0=none)
+
+        # Device identification
         self.device_name: str = ""
+        self.product_name: str = ""
+        self.device_label: str = ""
+        self.device_identifier: str = ""
+
+        # Firmware versions
         self.pcb_version: str = ""
         self.equipment_version: str = ""
+
+        # Oil information
+        self.oils: list[OilInfo] = []
+        self.battery_level: int = 0
+
+        # Schedules
+        self.schedules: list[Schedule] = []
+
+    def reset_lists(self) -> None:
+        """Reset list fields to empty lists for fresh data burst parsing."""
+        self.oils = []
+        self.schedules = []
 
 
 class AromaTechCoordinator(DataUpdateCoordinator[None]):
@@ -115,10 +189,15 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         self._reconnect_attempts = 0
         self._shutting_down = False
 
+        # Data burst collection state (for post-login data collection)
+        self._collecting_data_burst = False
+        self._data_burst_responses: list[bytes] = []
+
         # Device state
         self.info = DeviceInfo()
         self.state = DeviceState()
         self._logged_in = False
+        self._initial_state_loaded = False
 
         # Presence tracking
         self.last_seen: datetime | None = None
@@ -171,6 +250,10 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         _LOGGER.debug("Received notification: %s", data.hex())
         self._last_response = data
         self._response_event.set()
+
+        # Collect responses during data burst phase
+        if self._collecting_data_burst:
+            self._data_burst_responses.append(data)
 
     def _cancel_disconnect_timer(self) -> None:
         """Cancel the pending disconnect timer."""
@@ -382,32 +465,52 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
             return False
 
     async def _async_login(self) -> bool:
-        """Authenticate with the device."""
-        # Try login without pair code first (works for V2.0)
-        login_cmd = bytes([CMD_LOGIN]) + self._password.encode("utf-8")
-        response = await self._async_write_command(login_cmd, timeout=2.0)
+        """Authenticate with the device and collect post-login data burst."""
+        # Prepare for data burst collection
+        self._data_burst_responses = []
+        self._collecting_data_burst = True
 
-        if not response:
-            # Retry with pair code for V3.0 devices
-            login_cmd_v3 = (
-                bytes([CMD_LOGIN]) + (self._password + PAIR_CODE).encode("utf-8")
-            )
-            response = await self._async_write_command(login_cmd_v3, timeout=2.0)
+        try:
+            # Try login without pair code first (works for V2.0)
+            login_cmd = bytes([CMD_LOGIN]) + self._password.encode("utf-8")
+            response = await self._async_write_command(login_cmd, timeout=2.0)
 
-        if response and len(response) > 0 and response[0] == CMD_LOGIN:
-            login_state = self._parse_login_response(response)
-            self._logged_in = login_state == 0
-
-            if self._logged_in:
-                await self._async_send_time()
-                _LOGGER.debug(
-                    "Logged in successfully. Protocol version: %s",
-                    self.info.blue_version,
+            if not response:
+                # Retry with pair code for V3.0 devices
+                login_cmd_v3 = (
+                    bytes([CMD_LOGIN]) + (self._password + PAIR_CODE).encode("utf-8")
                 )
-                return True
+                response = await self._async_write_command(login_cmd_v3, timeout=2.0)
 
-        _LOGGER.error("Login failed")
-        return False
+            if response and len(response) > 0 and response[0] == CMD_LOGIN:
+                login_state = self._parse_login_response(response)
+                self._logged_in = login_state == 0
+
+                if self._logged_in:
+                    _LOGGER.debug(
+                        "Logged in successfully. Protocol version: %s",
+                        self.info.blue_version,
+                    )
+
+                    # Wait for post-login data burst from device
+                    # The device automatically sends all state data after login
+                    await asyncio.sleep(DATA_BURST_TIMEOUT)
+
+                    # Stop collecting and parse the data burst
+                    self._collecting_data_burst = False
+                    self._parse_data_burst()
+
+                    # Send current time after collecting data
+                    await self._async_send_time()
+
+                    self._initial_state_loaded = True
+                    return True
+
+            _LOGGER.error("Login failed")
+            return False
+
+        finally:
+            self._collecting_data_burst = False
 
     def _parse_login_response(self, data: bytes) -> int:
         """Parse login response.
@@ -444,6 +547,296 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         if len(response_str) >= 9:
             return 0 if response_str[7:9] == PAIR_CODE[:2] else 1
         return 0
+
+    def _parse_data_burst(self) -> None:
+        """Parse all responses collected during post-login data burst.
+
+        The device automatically sends a burst of data after login containing:
+        - Device limits and capabilities (0x46)
+        - Device name (0x42)
+        - Product name (0x45)
+        - Schedules (0x4A) - includes current power/fan state
+        - Device label (0x43)
+        - Intensity presets (0x47)
+        - Oil names (0x48)
+        - Oil amounts and battery (0x4B)
+        - Version info (0x44)
+        - Various status bytes (0x41, 0x4C, 0x4D, 0x4E, 0x50)
+        """
+        _LOGGER.debug(
+            "Parsing data burst with %d responses", len(self._data_burst_responses)
+        )
+
+        # Reset lists for fresh data
+        self.state.reset_lists()
+
+        # Track oil names separately to correlate with amounts
+        oil_names: list[str] = []
+
+        for data in self._data_burst_responses:
+            if len(data) == 0:
+                continue
+
+            cmd = data[0]
+
+            try:
+                if cmd == RESP_BUFFER_CLEAR:
+                    # 0x40: Buffer clear - signals start of data burst, ignore
+                    pass
+
+                elif cmd == RESP_LIMITS_V3:
+                    # 0x46: Device limits (max intensity, custom time limits)
+                    self._parse_limits_response(data)
+
+                elif cmd == RESP_NAME_V3:
+                    # 0x42: Bluetooth device name
+                    self.state.device_name = (
+                        data[1:].decode("utf-8", errors="ignore").rstrip("\x00")
+                    )
+
+                elif cmd == RESP_PRODUCT_NAME:
+                    # 0x45: Product/model name (e.g., "AROMINI BT PLUS")
+                    self.state.product_name = (
+                        data[1:].decode("utf-8", errors="ignore").rstrip("\x00")
+                    )
+
+                elif cmd == RESP_SCHEDULE_V3:
+                    # 0x4A: Schedule data - also contains current power state
+                    self._parse_schedule_v3(data)
+
+                elif cmd == RESP_DEVICE_LABEL_V3:
+                    # 0x43: Custom device label
+                    self.state.device_label = (
+                        data[1:].decode("utf-8", errors="ignore").rstrip("\x00")
+                    )
+
+                elif cmd == RESP_INTENSITY_PRESETS:
+                    # 0x47: Intensity preset table - informational only
+                    _LOGGER.debug("Received intensity presets: %s", data.hex())
+
+                elif cmd == RESP_OIL_NAMES_V3:
+                    # 0x48: Oil/aroma names (16 bytes per name)
+                    oil_names = self._parse_oil_names(data)
+
+                elif cmd == RESP_OIL_AMOUNTS_V3:
+                    # 0x4B: Oil amounts and battery level
+                    self._parse_oil_amounts(data, oil_names)
+
+                elif cmd == RESP_VERSION_V3:
+                    # 0x44: PCB and equipment firmware versions
+                    if len(data) > 17:
+                        self.state.pcb_version = (
+                            data[1:17].decode("utf-8", errors="ignore").rstrip("\x00")
+                        )
+                        self.state.equipment_version = (
+                            data[17:].decode("utf-8", errors="ignore").rstrip("\x00")
+                        )
+
+                elif cmd == RESP_IDENTIFIER:
+                    # 0x4C: Device identifier (e.g., "001")
+                    self.state.device_identifier = (
+                        data[1:].decode("utf-8", errors="ignore").rstrip("\x00")
+                    )
+
+                elif cmd == RESP_SCHEDULE_V2:
+                    # 0x83: V2.0 schedule response - also contains oil info for slot 1
+                    self._parse_schedule_v2(data)
+
+                elif cmd == RESP_OIL_V2:
+                    # 0x91: V2.0 dedicated oil response
+                    self._parse_oil_v2(data)
+
+                else:
+                    # Unknown or status bytes - log for debugging
+                    _LOGGER.debug(
+                        "Unhandled data burst response 0x%02X: %s", cmd, data.hex()
+                    )
+
+            except Exception as err:
+                _LOGGER.warning(
+                    "Error parsing data burst response 0x%02X: %s", cmd, err
+                )
+
+        _LOGGER.info(
+            "Data burst parsed: is_on=%s, intensity=%d, oils=%d, schedules=%d",
+            self.state.is_on,
+            self.state.intensity,
+            len(self.state.oils),
+            len(self.state.schedules),
+        )
+
+    def _parse_limits_response(self, data: bytes) -> None:
+        """Parse limits response (0x46 for V3.0, 0x84 for V2.0)."""
+        if len(data) >= 10 and data[0] == RESP_LIMITS_V3:
+            self.info.max_grade = data[1]
+            self.info.custom_on_min = (data[2] << 8) + data[3]
+            self.info.custom_on_max = (data[4] << 8) + data[5]
+            self.info.custom_off_min = (data[6] << 8) + data[7]
+            self.info.custom_off_max = (data[8] << 8) + data[9]
+            _LOGGER.debug("Parsed limits: max_grade=%d", self.info.max_grade)
+
+    def _parse_schedule_v3(self, data: bytes) -> None:
+        """Parse V3.0 schedule response (0x4A).
+
+        This response contains both schedule configuration AND current power state.
+        """
+        if len(data) < 14:
+            return
+
+        schedule = Schedule(
+            aroma=data[1],
+            index=data[5],
+            hour_on=data[7],
+            minute_on=data[8],
+            hour_off=data[9],
+            minute_off=data[10],
+            repeat_days=format(data[11], "07b"),
+            intensity=data[13] if len(data) > 13 else 1,
+        )
+
+        # Parse total control byte (byte 3): bit0=totalFan, bit1=totalFog
+        total_control = data[3]
+        schedule.total_fan = bool(total_control & 0x01)
+        schedule.total_fog = bool(total_control & 0x02)
+
+        # Parse slot control byte (byte 6): bit0=fan, bit1=enabled, bit2=show
+        slot_control = data[6]
+        schedule.fan_enabled = bool(slot_control & 0x01)
+        schedule.enabled = bool(slot_control & 0x02)
+
+        # Update current device state from the first schedule
+        # The total_fan and total_fog represent actual current device state
+        if schedule.index == 1 or not self.state.schedules:
+            self.state.is_on = schedule.total_fog
+            self.state.fan_on = schedule.total_fan
+            self.state.intensity = schedule.intensity
+            self.state.active_schedule = data[4] if len(data) > 4 else 0
+
+        self.state.schedules.append(schedule)
+        _LOGGER.debug(
+            "Parsed schedule %d: enabled=%s, intensity=%d, is_on=%s",
+            schedule.index,
+            schedule.enabled,
+            schedule.intensity,
+            self.state.is_on,
+        )
+
+    def _parse_schedule_v2(self, data: bytes) -> None:
+        """Parse V2.0 schedule response (0x83).
+
+        For slot 1, this also contains embedded oil information.
+        """
+        if len(data) < 8:
+            return
+
+        # Parse control byte: bit0=enabled, bits1-4=index
+        control = data[1]
+        enabled = bool(control & 0x01)
+        index = (control >> 1) & 0x0F
+
+        schedule = Schedule(
+            index=index,
+            enabled=enabled,
+            hour_on=data[2],
+            minute_on=data[3],
+            hour_off=data[4],
+            minute_off=data[5],
+            repeat_days=format(data[6], "07b"),
+            intensity=data[7],
+        )
+
+        # Update current device state from the first schedule
+        if index == 1:
+            self.state.is_on = enabled
+            self.state.intensity = schedule.intensity if schedule.intensity > 0 else 1
+
+            # Parse embedded oil info from slot 1 (if present)
+            if len(data) > 14:
+                hex_str = data.hex().upper()
+                try:
+                    remainder = int(hex_str[20:24], 16)
+                    total = int(hex_str[24:28], 16)
+                    battery = data[14]
+
+                    oil = OilInfo(name="Oil 1", total=total, remainder=remainder)
+                    self.state.oils = [oil]
+                    self.state.battery_level = battery
+                except (ValueError, IndexError):
+                    pass
+
+        self.state.schedules.append(schedule)
+
+    def _parse_oil_names(self, data: bytes) -> list[str]:
+        """Parse oil names response (0x48).
+
+        Each oil name is 16 bytes, UTF-8 encoded.
+        """
+        names: list[str] = []
+        i = 1  # Skip command byte
+        while i + 16 <= len(data):
+            name = data[i : i + 16].decode("utf-8", errors="ignore").rstrip("\x00")
+            # Clean any embedded null characters
+            name = name.replace("\x00", "")
+            names.append(name if name else f"Oil {len(names) + 1}")
+            i += 16
+
+        _LOGGER.debug("Parsed oil names: %s", names)
+        return names
+
+    def _parse_oil_amounts(self, data: bytes, oil_names: list[str]) -> None:
+        """Parse oil amounts response (0x4B).
+
+        Format: [cmd] [battery] [reserved] [oil1_total:2] [oil1_remain:2] ...
+        """
+        if len(data) < 4:
+            return
+
+        self.state.battery_level = data[1]
+
+        hex_str = data.hex().upper()
+        i = 4  # Start after cmd byte + battery + reserved (2 bytes each in hex = 4 chars)
+        idx = 0
+
+        while i + 8 <= len(hex_str):
+            try:
+                total = int(hex_str[i : i + 4], 16)
+                remainder = int(hex_str[i + 4 : i + 8], 16)
+
+                name = oil_names[idx] if idx < len(oil_names) else f"Oil {idx + 1}"
+                oil = OilInfo(name=name, total=total, remainder=remainder)
+                self.state.oils.append(oil)
+
+                _LOGGER.debug(
+                    "Parsed oil %d: %s - %d/%d (%.1f%%)",
+                    idx + 1,
+                    name,
+                    remainder,
+                    total,
+                    oil.percentage,
+                )
+
+                i += 8
+                idx += 1
+            except (ValueError, IndexError) as err:
+                _LOGGER.warning("Error parsing oil amount at index %d: %s", idx, err)
+                break
+
+    def _parse_oil_v2(self, data: bytes) -> None:
+        """Parse V2.0 oil response (0x91)."""
+        if len(data) < 4:
+            return
+
+        hex_str = data.hex().upper()
+        try:
+            remainder = int(hex_str[2:6], 16)
+            battery = data[3]
+
+            # V2.0 doesn't provide total, estimate based on typical capacity
+            oil = OilInfo(name="Oil 1", total=0, remainder=remainder)
+            self.state.oils = [oil]
+            self.state.battery_level = battery
+        except (ValueError, IndexError):
+            pass
 
     async def _async_send_time(self) -> None:
         """Send current time to the device."""
@@ -596,22 +989,29 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         await self._async_write_command(bytes(cmd))
 
     async def async_read_device_info(self) -> None:
-        """Read device name, version, and limits."""
-        async def _read_info() -> None:
-            # Read device name
-            response = await self._async_write_command(bytes([CMD_READ_NAME]))
-            if response:
-                if response[0] == RESP_NAME_V2:
-                    self.state.device_name = (
-                        response[2:].decode("utf-8", errors="ignore").rstrip("\x00")
-                    )
-                elif response[0] == RESP_NAME_V3:
-                    self.state.device_name = (
-                        response[1:].decode("utf-8", errors="ignore").rstrip("\x00")
-                    )
+        """Read device info - most data comes from post-login data burst.
 
-            # Read version (V3.0 only)
-            if self.info.blue_version >= 3.0:
+        For V3.0 devices, the post-login data burst already provides all the
+        information we need. This method only fetches additional data for V2.0
+        devices or if the data burst didn't provide certain fields.
+        """
+        async def _read_info() -> None:
+            # For V2.0 devices or if device name wasn't in data burst
+            if not self.state.device_name:
+                response = await self._async_write_command(bytes([CMD_READ_NAME]))
+                if response:
+                    if response[0] == RESP_NAME_V2:
+                        self.state.device_name = (
+                            response[2:].decode("utf-8", errors="ignore").rstrip("\x00")
+                        )
+                    elif response[0] == RESP_NAME_V3:
+                        self.state.device_name = (
+                            response[1:].decode("utf-8", errors="ignore").rstrip("\x00")
+                        )
+
+            # For V3.0 devices, version comes from data burst
+            # For V2.0, we need to request it separately
+            if self.info.blue_version < 3.0 and not self.state.pcb_version:
                 response = await self._async_write_command(bytes([CMD_VERSION_V3]))
                 if response and len(response) > 17:
                     self.state.pcb_version = (
@@ -621,8 +1021,9 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
                         response[17:].decode("utf-8", errors="ignore").rstrip("\x00")
                     )
 
-            # Read limits
-            await self._async_read_limits()
+            # Read limits if not already populated from data burst
+            if self.info.max_grade == 5:  # Default value, may not be set
+                await self._async_read_limits()
 
         await self.async_execute_command(_read_info)
 

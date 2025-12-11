@@ -93,15 +93,29 @@ Controls the fragrance intensity level.
 
 The power switch entity exposes additional attributes:
 
-| Attribute           | Description                  |
-| ------------------- | ---------------------------- |
-| `device_name`       | Device model name            |
-| `protocol_version`  | V2.0 or V3.0                 |
-| `current_intensity` | Current intensity setting    |
-| `max_intensity`     | Maximum supported intensity  |
-| `rssi`              | Bluetooth signal strength    |
-| `last_seen`         | Last communication timestamp |
-| `connected`         | Current connection state     |
+| Attribute                   | Description                                      |
+| --------------------------- | ------------------------------------------------ |
+| `device_name`               | Bluetooth device name                            |
+| `product_name`              | Product model (e.g., "AROMINI BT PLUS")          |
+| `protocol_version`          | Protocol version (V2.0 or V3.0)                  |
+| `connected`                 | Current connection state                         |
+| `current_intensity`         | Current intensity setting (1-5)                  |
+| `max_intensity`             | Maximum supported intensity                      |
+| `fan_on`                    | Fan power state                                  |
+| `oil_support`               | Device supports oil level tracking               |
+| `battery_support`           | Device has battery                               |
+| `oil_name`                  | Name of the loaded oil/fragrance                 |
+| `oil_total`                 | Total oil capacity                               |
+| `oil_remaining`             | Remaining oil amount                             |
+| `oil_percentage`            | Oil remaining percentage                         |
+| `battery_level`             | Battery level (if supported)                     |
+| `pcb_version`               | PCB firmware version                             |
+| `equipment_version`         | Equipment firmware version                       |
+| `rssi`                      | Bluetooth signal strength                        |
+| `last_seen`                 | Last communication timestamp                     |
+
+Note: Multi-aroma devices will have numbered oil attributes (e.g., `oil_1_name`,
+`oil_2_name`, etc.).
 
 ## Example Automations
 

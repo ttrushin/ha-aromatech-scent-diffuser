@@ -48,26 +48,58 @@ class AromaTechSwitch(AromaTechEntity, SwitchEntity):
         """Return extra state attributes."""
         info = self.coordinator.info
         state = self.coordinator.state
-        attrs = {
+        attrs: dict[str, Any] = {
+            # Device identification
             "device_name": self.coordinator.device_name,
-            "protocol_version": info.blue_version,
-            "max_intensity": info.max_grade,
+            "protocol_version": f"V{info.blue_version}",
+            "connected": self.coordinator.connected,
+
+            # Current operation state
             "current_intensity": self.coordinator.intensity,
+            "max_intensity": info.max_grade,
+            "fan_on": state.fan_on,
+
+            # Device capabilities
             "oil_support": info.oil,
             "battery_support": info.battery,
             "custom_intensity_support": info.custom,
             "fan_control_support": info.fan,
             "multiple_aroma_support": info.many_aroma,
-            "connected": self.coordinator.connected,
         }
 
-        # Add version info if available
+        # Product and label info
+        if state.product_name:
+            attrs["product_name"] = state.product_name
+        if state.device_label:
+            attrs["device_label"] = state.device_label
+        if state.device_identifier:
+            attrs["device_identifier"] = state.device_identifier
+
+        # Firmware versions
         if state.pcb_version:
             attrs["pcb_version"] = state.pcb_version
         if state.equipment_version:
             attrs["equipment_version"] = state.equipment_version
 
-        # Add connection info
+        # Oil information - expose each oil slot's data
+        if state.oils:
+            for i, oil in enumerate(state.oils, 1):
+                prefix = f"oil_{i}" if len(state.oils) > 1 else "oil"
+                if oil.name:
+                    attrs[f"{prefix}_name"] = oil.name
+                if oil.total > 0:
+                    attrs[f"{prefix}_total"] = oil.total
+                    attrs[f"{prefix}_remaining"] = oil.remainder
+                    attrs[f"{prefix}_percentage"] = oil.percentage
+                elif oil.remainder > 0:
+                    # V2.0 devices may not report total
+                    attrs[f"{prefix}_remaining"] = oil.remainder
+
+        # Battery level (if supported)
+        if info.battery and state.battery_level > 0:
+            attrs["battery_level"] = state.battery_level
+
+        # Connection/presence info
         if self.coordinator.last_seen:
             attrs["last_seen"] = self.coordinator.last_seen.isoformat()
         if self.coordinator.rssi is not None:
