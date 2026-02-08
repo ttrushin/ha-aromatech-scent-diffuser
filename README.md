@@ -51,7 +51,7 @@ including:
 
 1. Open HACS in Home Assistant
 2. Click the three dots in the top right corner and select "Custom repositories"
-3. Add `ttrushin/ha-aromatech-scent-diffusers` with category "Integration"
+3. Add `ttrushin/ha-aromatech-scent-diffuser` with category "Integration"
 4. Click "Install" on the AromaTech Scent Diffusers integration
 5. Restart Home Assistant
 
