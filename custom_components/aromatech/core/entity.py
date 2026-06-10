@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -38,5 +37,9 @@ class AromaTechEntity(CoordinatorEntity["AromaTechCoordinator"]):
 
     @property
     def available(self) -> bool:
-        """Return True if entity is available."""
-        return self.coordinator.last_seen is not None
+        """Return True if entity is available.
+
+        The device is reachable if we hold a connection to it OR it is
+        currently advertising (it stops advertising while connected).
+        """
+        return self.coordinator.device_available

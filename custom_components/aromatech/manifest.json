@@ -1,6 +1,53 @@
 {
   "domain": "aromatech",
   "name": "AromaTech Scent Diffuser",
+  "bluetooth": [
+    {
+      "manufacturer_id": 22851
+    },
+    {
+      "local_name": "AroMini*"
+    },
+    {
+      "local_name": "AROMINI*"
+    },
+    {
+      "local_name": "AromaPro*"
+    },
+    {
+      "local_name": "Air Stream*"
+    },
+    {
+      "local_name": "AT-600*"
+    },
+    {
+      "local_name": "AT600*"
+    },
+    {
+      "local_name": "SB-400*"
+    },
+    {
+      "local_name": "SB-600*"
+    },
+    {
+      "local_name": "SB-1500*"
+    },
+    {
+      "local_name": "SE8150*"
+    },
+    {
+      "local_name": "8150D*"
+    },
+    {
+      "local_name": "SE005*"
+    },
+    {
+      "local_name": "AE103*"
+    },
+    {
+      "local_name": "A313*"
+    }
+  ],
   "codeowners": [
     "@ttrushin"
   ],
@@ -10,12 +57,16 @@
     "bluetooth_adapters"
   ],
   "documentation": "https://github.com/ttrushin/ha-aromatech-scent-diffuser",
-  "issue_tracker": "https://github.com/ttrushin/ha-aromatech-scent-diffuser/issues",
   "integration_type": "device",
   "iot_class": "local_push",
+  "issue_tracker": "https://github.com/ttrushin/ha-aromatech-scent-diffuser/issues",
+  "loggers": [
+    "bleak",
+    "bleak_retry_connector"
+  ],
   "requirements": [
     "bleak>=0.21.0",
     "bleak-retry-connector>=3.0.0"
   ],
-  "version": "1.1.0"
+  "version": "1.2.0"
 }

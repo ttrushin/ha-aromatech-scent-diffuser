@@ -74,3 +74,7 @@ DEFAULT_INTENSITY = 1
 
 # Post-login data burst collection timeout (seconds)
 DATA_BURST_TIMEOUT = 1.5
+
+# Options
+CONF_HEALTH_CHECK_INTERVAL = "health_check_interval"
+DEFAULT_HEALTH_CHECK_INTERVAL = 0  # 0 = disabled

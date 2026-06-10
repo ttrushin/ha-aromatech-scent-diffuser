@@ -6,13 +6,12 @@ import logging
 from typing import Any
 
 from homeassistant.components.switch import SwitchEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import AromaTechConfigEntry
 from .coordinator import AromaTechCoordinator
-from .core.const import DOMAIN
 from .core.entity import AromaTechEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -20,12 +19,11 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
+    config_entry: AromaTechConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up AromaTech switch from a config entry."""
-    coordinator: AromaTechCoordinator = hass.data[DOMAIN][config_entry.entry_id]
-    async_add_entities([AromaTechSwitch(coordinator)])
+    async_add_entities([AromaTechSwitch(config_entry.runtime_data)])
 
 
 class AromaTechSwitch(AromaTechEntity, SwitchEntity):

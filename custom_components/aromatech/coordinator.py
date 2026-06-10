@@ -5,15 +5,17 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Callable, Coroutine
 
 from bleak import BleakClient
 from bleak.exc import BleakError
 from bleak_retry_connector import establish_connection
 
+from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .core.const import (
     CHARACTERISTIC_UUID,
@@ -25,7 +27,7 @@ from .core.const import (
     CMD_SCHEDULE_WRITE_V3,
     CMD_TIME_V2,
     CMD_TIME_V3,
-    CMD_VERSION_V3,
+    CMD_VERSION_V2,
     DATA_BURST_TIMEOUT,
     DEFAULT_AROMA_SLOT,
     DEFAULT_INTENSITY,
@@ -49,19 +51,18 @@ from .core.const import (
 
 if TYPE_CHECKING:
     from bleak.backends.device import BLEDevice
-    from bleak.backends.scanner import AdvertisementData
 
 _LOGGER = logging.getLogger(__name__)
 
 # Connection settings
-CONNECTION_TIMEOUT = 15.0
 COMMAND_TIMEOUT = 5.0
 # Disconnect after 30 minutes of idle when device is OFF
 DISCONNECT_DELAY_OFF = 30 * 60  # 30 minutes in seconds
-# Reconnection settings for when device is ON
-RECONNECT_MIN_INTERVAL = 5  # Start with 5 seconds
-RECONNECT_MAX_INTERVAL = 60  # Max 60 seconds between attempts
-RECONNECT_MAX_ATTEMPTS = 10  # Give up after this many consecutive failures
+# The device only advertises while it has no active connection, so an
+# advertisement received while we believe we are connected means our
+# connection is actually dead. Advertisements can lag behind a fresh
+# connection (proxy buffering), so ignore them for a grace period.
+ADVERTISEMENT_STALE_GRACE = 30.0  # seconds
 
 
 @dataclass
@@ -164,14 +165,19 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         hass: HomeAssistant,
         ble_device: BLEDevice,
         password: str,
+        health_check_interval: int = 0,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
             hass,
             _LOGGER,
             name=f"AromaTech {ble_device.address}",
-            # No polling - we use push updates from BLE advertisements
-            update_interval=None,
+            # Push updates from BLE; optional polling acts as a health check
+            update_interval=(
+                timedelta(seconds=health_check_interval)
+                if health_check_interval > 0
+                else None
+            ),
         )
 
         self._ble_device = ble_device
@@ -183,10 +189,13 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         self._disconnect_timer: asyncio.TimerHandle | None = None
         self._response_event = asyncio.Event()
         self._last_response: bytes = b""
+        self._command_pending = False
+        self._connecting = False
+        self._connected_at: float = 0.0
+        self._expected_disconnect = False
 
         # Reconnection state (for when device is ON and connection drops)
         self._reconnect_task: asyncio.Task | None = None
-        self._reconnect_attempts = 0
         self._shutting_down = False
 
         # Data burst collection state (for post-login data collection)
@@ -197,11 +206,14 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         self.info = DeviceInfo()
         self.state = DeviceState()
         self._logged_in = False
-        self._initial_state_loaded = False
 
         # Presence tracking
         self.last_seen: datetime | None = None
         self.rssi: int | None = None
+        # True while HA's bluetooth stack considers the device in range.
+        # The device stops advertising while connected, so availability is
+        # "connected OR recently advertising".
+        self._advertising = True
 
     @property
     def mac(self) -> str:
@@ -212,6 +224,16 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
     def connected(self) -> bool:
         """Return True if connected to the device."""
         return self._client is not None and self._client.is_connected
+
+    @property
+    def device_available(self) -> bool:
+        """Return True if the device is reachable.
+
+        The device stops advertising while it holds a connection, so it is
+        considered available if we are connected OR it was recently seen
+        advertising.
+        """
+        return self.connected or self._advertising
 
     @property
     def is_on(self) -> bool:
@@ -228,22 +250,113 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         """Return the device name."""
         return self.state.device_name
 
-    def update_ble_device(self, ble_device: BLEDevice) -> None:
-        """Update the BLE device reference."""
-        self._ble_device = ble_device
+    @callback
+    def async_handle_advertisement(
+        self,
+        service_info: bluetooth.BluetoothServiceInfoBleak,
+        change: bluetooth.BluetoothChange,
+    ) -> None:
+        """Handle a BLE advertisement from the device.
+
+        The device only advertises while it has no active connection, so an
+        advertisement is both a presence signal and a "connectable right now"
+        signal. It also doubles as a health check: seeing one while we think
+        we are connected proves our connection is a zombie.
+        """
+        self._ble_device = service_info.device
+        self.last_seen = dt_util.utcnow()
+        if service_info.rssi is not None:
+            self.rssi = service_info.rssi
+        self._advertising = True
+
+        self._async_evaluate_connection_from_advertisement()
+        self.async_update_listeners()
 
     @callback
-    def update_ble(self, advertisement: AdvertisementData) -> None:
-        """Update device info from BLE advertisement."""
-        self.last_seen = datetime.now()
-        if advertisement.rssi is not None:
-            self.rssi = advertisement.rssi
-        self.async_set_updated_data(None)
+    def async_handle_unavailable(
+        self, service_info: bluetooth.BluetoothServiceInfoBleak
+    ) -> None:
+        """Handle the device no longer being seen by any scanner."""
+        self._advertising = False
+        if not self.connected:
+            _LOGGER.warning(
+                "%s is no longer seen by any Bluetooth scanner and is not "
+                "connected - marking unavailable",
+                self._ble_device.address,
+            )
+        self.async_update_listeners()
+
+    @callback
+    def _async_evaluate_connection_from_advertisement(self) -> None:
+        """Decide whether an advertisement should trigger a (re)connection."""
+        if self._shutting_down or self._connecting:
+            return
+
+        if self.connected:
+            # Advertisements can lag a fresh connection; only treat them as a
+            # zombie signal once the connection has had time to settle.
+            if (
+                self.hass.loop.time() - self._connected_at
+                < ADVERTISEMENT_STALE_GRACE
+            ):
+                return
+            _LOGGER.warning(
+                "Received advertisement from %s while connected - the "
+                "connection is stale, tearing it down",
+                self._ble_device.address,
+            )
+            self._async_schedule_reconnect(teardown=True)
+        elif self.state.is_on:
+            # Device should be connected (it's ON) but we lost the link
+            self._async_schedule_reconnect()
+
+    @callback
+    def _async_schedule_reconnect(self, teardown: bool = False) -> None:
+        """Schedule a reconnect task if one is not already running."""
+        if self._reconnect_task and not self._reconnect_task.done():
+            return
+        self._reconnect_task = self.hass.async_create_task(
+            self._async_reconnect(teardown)
+        )
+
+    async def _async_reconnect(self, teardown: bool) -> None:
+        """Tear down a stale connection and reconnect if the device is ON."""
+        async with self._connection_lock:
+            if self._shutting_down:
+                return
+            if teardown:
+                await self._async_disconnect_internal()
+            if self.state.is_on and await self._async_ensure_connected():
+                _LOGGER.info("Reconnected to %s", self._ble_device.address)
+                # The post-login data burst refreshed the device state; if it
+                # turned OFF while we were disconnected, arm the idle timer
+                self._schedule_disconnect()
+        self.async_update_listeners()
 
     async def _async_update_data(self) -> None:
-        """Fetch data from device - not used for polling, only for state updates."""
-        # This coordinator doesn't poll; it uses push updates
-        return None
+        """Periodic connection health check (opt-in via integration options)."""
+        if self._shutting_down:
+            return
+
+        # OFF and disconnected is a healthy idle state - nothing to check
+        if not self.connected and not self.state.is_on:
+            return
+
+        async with self._connection_lock:
+            if self.connected:
+                # Probe the connection with a harmless read; no response
+                # within the timeout means the link is dead.
+                response = await self._async_write_command(bytes([CMD_READ_NAME]))
+                if response:
+                    return
+                _LOGGER.warning(
+                    "Health check probe to %s failed - connection is stale",
+                    self._ble_device.address,
+                )
+                await self._async_disconnect_internal()
+
+            if self.state.is_on and await self._async_ensure_connected():
+                self._schedule_disconnect()
 
     def _notification_handler(self, sender: int, data: bytes) -> None:
         """Handle notifications from the device."""
@@ -254,6 +367,43 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         # Collect responses during data burst phase
         if self._collecting_data_burst:
             self._data_burst_responses.append(data)
+            return
+
+        # Notifications outside a pending command are pushed by the device
+        # itself (e.g., state changed via the mobile app or physical buttons)
+        if not self._command_pending:
+            self._handle_unsolicited_notification(data)
+
+    def _handle_unsolicited_notification(self, data: bytes) -> None:
+        """Parse a state update the device pushed on its own."""
+        if len(data) == 0:
+            return
+
+        cmd = data[0]
+        try:
+            if cmd == RESP_SCHEDULE_V3:
+                self._parse_schedule_v3(data)
+            elif cmd == RESP_OIL_AMOUNTS_V3:
+                self._parse_oil_amounts(data, [oil.name for oil in self.state.oils])
+            elif cmd == RESP_SCHEDULE_V2:
+                self._parse_schedule_v2(data)
+            elif cmd == RESP_OIL_V2:
+                self._parse_oil_v2(data)
+            else:
+                return
+        except Exception as err:
+            _LOGGER.warning(
+                "Error parsing pushed notification 0x%02X: %s", cmd, err
+            )
+            return
+
+        _LOGGER.debug(
+            "Device pushed state update: is_on=%s, intensity=%d",
+            self.state.is_on,
+            self.state.intensity,
+        )
+        self._schedule_disconnect()
+        self.async_update_listeners()
 
     def _cancel_disconnect_timer(self) -> None:
         """Cancel the pending disconnect timer."""
@@ -265,8 +415,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         """Cancel any pending reconnection task."""
         if self._reconnect_task and not self._reconnect_task.done():
             self._reconnect_task.cancel()
-            self._reconnect_task = None
-        self._reconnect_attempts = 0
+        self._reconnect_task = None
 
     def _schedule_disconnect(self) -> None:
         """Schedule a disconnection based on device state.
@@ -300,73 +449,29 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
                 await self._async_disconnect_internal()
 
     def _on_disconnect(self, client: BleakClient) -> None:
-        """Handle unexpected disconnection from the device."""
-        _LOGGER.warning("Disconnected from %s", self._ble_device.address)
+        """Handle disconnection from the device."""
+        if client is not self._client:
+            # Callback from a client we already discarded
+            _LOGGER.debug("Ignoring disconnect from stale client")
+            return
+
         self._logged_in = False
 
-        # If device is ON and we're not shutting down, attempt to reconnect
-        if self.state.is_on and not self._shutting_down:
-            _LOGGER.info("Device is ON - will attempt to reconnect")
-            self._start_reconnect_task()
+        if self._expected_disconnect or self._shutting_down:
+            _LOGGER.debug("Disconnected from %s", self._ble_device.address)
+            return
 
-        self.async_set_updated_data(None)
-
-    def _start_reconnect_task(self) -> None:
-        """Start the reconnection task if not already running."""
-        if self._reconnect_task and not self._reconnect_task.done():
-            return  # Already reconnecting
-
-        self._reconnect_task = self.hass.async_create_task(
-            self._async_reconnect_loop()
+        _LOGGER.warning(
+            "Unexpectedly disconnected from %s", self._ble_device.address
         )
 
-    async def _async_reconnect_loop(self) -> None:
-        """Attempt to reconnect with exponential backoff."""
-        self._reconnect_attempts = 0
+        # Try one immediate reconnect for transient drops. If it fails, the
+        # device will start advertising (it has no connection now), and the
+        # advertisement callback takes over from there.
+        if self.state.is_on:
+            self._async_schedule_reconnect()
 
-        while (
-            self.state.is_on
-            and not self._shutting_down
-            and self._reconnect_attempts < RECONNECT_MAX_ATTEMPTS
-        ):
-            self._reconnect_attempts += 1
-
-            # Calculate backoff delay with exponential increase
-            delay = min(
-                RECONNECT_MIN_INTERVAL * (2 ** (self._reconnect_attempts - 1)),
-                RECONNECT_MAX_INTERVAL,
-            )
-
-            _LOGGER.info(
-                "Reconnection attempt %d/%d in %d seconds",
-                self._reconnect_attempts,
-                RECONNECT_MAX_ATTEMPTS,
-                delay,
-            )
-
-            await asyncio.sleep(delay)
-
-            # Check again if we should still reconnect
-            if not self.state.is_on or self._shutting_down:
-                _LOGGER.debug("Reconnection cancelled - device OFF or shutting down")
-                break
-
-            # Attempt to reconnect
-            async with self._connection_lock:
-                try:
-                    if await self._async_ensure_connected():
-                        _LOGGER.info("Successfully reconnected to device")
-                        self._reconnect_attempts = 0
-                        self.async_set_updated_data(None)
-                        return
-                except Exception as err:
-                    _LOGGER.warning("Reconnection attempt failed: %s", err)
-
-        if self._reconnect_attempts >= RECONNECT_MAX_ATTEMPTS:
-            _LOGGER.error(
-                "Failed to reconnect after %d attempts - giving up",
-                RECONNECT_MAX_ATTEMPTS,
-            )
+        self.async_update_listeners()
 
     async def _async_ensure_connected(self) -> bool:
         """Ensure we have an active connection to the device."""
@@ -379,19 +484,23 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         try:
             if not self._client or not self._client.is_connected:
                 _LOGGER.debug("Establishing connection to %s", self._ble_device.address)
-                self._client = await establish_connection(
-                    BleakClient,
-                    self._ble_device,
-                    self._ble_device.address,
-                    max_attempts=3,
-                    disconnected_callback=self._on_disconnect,
-                )
-                await self._client.start_notify(
-                    CHARACTERISTIC_UUID, self._notification_handler
-                )
+                self._connecting = True
+                try:
+                    client = await establish_connection(
+                        BleakClient,
+                        self._ble_device,
+                        self._ble_device.address,
+                        max_attempts=3,
+                        disconnected_callback=self._on_disconnect,
+                    )
+                    self._client = client
+                    await client.start_notify(
+                        CHARACTERISTIC_UUID, self._notification_handler
+                    )
+                finally:
+                    self._connecting = False
+                self._connected_at = self.hass.loop.time()
                 self._logged_in = False
-                # Reset reconnect counter on successful connection
-                self._reconnect_attempts = 0
 
             if not self._logged_in:
                 if not await self._async_login():
@@ -409,6 +518,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         """Internal disconnect without lock."""
         self._logged_in = False
         if self._client:
+            self._expected_disconnect = True
             try:
                 if self._client.is_connected:
                     await self._client.stop_notify(CHARACTERISTIC_UUID)
@@ -417,6 +527,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
                 _LOGGER.debug("Error during disconnect: %s", err)
             finally:
                 self._client = None
+                self._expected_disconnect = False
 
     async def async_disconnect(self) -> None:
         """Disconnect from the device (called during unload)."""
@@ -437,6 +548,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
 
         self._response_event.clear()
         self._last_response = b""
+        self._command_pending = True
 
         try:
             _LOGGER.debug("Writing command: %s", data.hex())
@@ -449,6 +561,8 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         except Exception as err:
             _LOGGER.error("Failed to write command: %s", err)
             return b""
+        finally:
+            self._command_pending = False
 
     async def _async_write_command_no_response(self, data: bytes) -> bool:
         """Write a command without waiting for response."""
@@ -502,8 +616,6 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
 
                     # Send current time after collecting data
                     await self._async_send_time()
-
-                    self._initial_state_loaded = True
                     return True
 
             _LOGGER.error("Login failed")
@@ -704,15 +816,14 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         schedule.fan_enabled = bool(slot_control & 0x01)
         schedule.enabled = bool(slot_control & 0x02)
 
-        # Update current device state from the first schedule
-        # The total_fan and total_fog represent actual current device state
+        # The total control bits carry the live power/fan state in every frame
+        self.state.is_on = schedule.total_fog
+        self.state.fan_on = schedule.total_fan
         if schedule.index == 1 or not self.state.schedules:
-            self.state.is_on = schedule.total_fog
-            self.state.fan_on = schedule.total_fan
             self.state.intensity = schedule.intensity
-            self.state.active_schedule = data[4] if len(data) > 4 else 0
+            self.state.active_schedule = data[4]
 
-        self.state.schedules.append(schedule)
+        self._upsert_schedule(schedule)
         _LOGGER.debug(
             "Parsed schedule %d: enabled=%s, intensity=%d, is_on=%s",
             schedule.index,
@@ -764,6 +875,14 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
                 except (ValueError, IndexError):
                     pass
 
+        self._upsert_schedule(schedule)
+
+    def _upsert_schedule(self, schedule: Schedule) -> None:
+        """Insert or replace a schedule slot by its index."""
+        for i, existing in enumerate(self.state.schedules):
+            if existing.index == schedule.index:
+                self.state.schedules[i] = schedule
+                return
         self.state.schedules.append(schedule)
 
     def _parse_oil_names(self, data: bytes) -> list[str]:
@@ -793,6 +912,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
 
         self.state.battery_level = data[1]
 
+        oils: list[OilInfo] = []
         hex_str = data.hex().upper()
         i = 4  # Start after cmd byte + battery + reserved (2 bytes each in hex = 4 chars)
         idx = 0
@@ -804,7 +924,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
 
                 name = oil_names[idx] if idx < len(oil_names) else f"Oil {idx + 1}"
                 oil = OilInfo(name=name, total=total, remainder=remainder)
-                self.state.oils.append(oil)
+                oils.append(oil)
 
                 _LOGGER.debug(
                     "Parsed oil %d: %s - %d/%d (%.1f%%)",
@@ -820,6 +940,8 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
             except (ValueError, IndexError) as err:
                 _LOGGER.warning("Error parsing oil amount at index %d: %s", idx, err)
                 break
+
+        self.state.oils = oils
 
     def _parse_oil_v2(self, data: bytes) -> None:
         """Parse V2.0 oil response (0x91)."""
@@ -839,8 +961,8 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
             pass
 
     async def _async_send_time(self) -> None:
-        """Send current time to the device."""
-        dt = datetime.now()
+        """Send current local time to the device (it drives schedules)."""
+        dt = dt_util.now()
         day_of_week = (dt.weekday() + 1) % 7
 
         cmd_byte = CMD_TIME_V2 if self.info.blue_version == 2.0 else CMD_TIME_V3
@@ -879,7 +1001,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
                 self._schedule_disconnect()
 
         # Update state after command
-        self.async_set_updated_data(None)
+        self.async_update_listeners()
 
     async def async_power_on(self, intensity: int | None = None) -> None:
         """Turn on the diffuser."""
@@ -988,6 +1110,14 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
 
         await self._async_write_command(bytes(cmd))
 
+    async def async_initialize(self) -> None:
+        """Connect, log in, and load initial device state.
+
+        Called once during config entry setup. Raises UpdateFailed if the
+        device cannot be reached so setup can be retried by Home Assistant.
+        """
+        await self.async_read_device_info()
+
     async def async_read_device_info(self) -> None:
         """Read device info - most data comes from post-login data burst.
 
@@ -1012,7 +1142,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
             # For V3.0 devices, version comes from data burst
             # For V2.0, we need to request it separately
             if self.info.blue_version < 3.0 and not self.state.pcb_version:
-                response = await self._async_write_command(bytes([CMD_VERSION_V3]))
+                response = await self._async_write_command(bytes([CMD_VERSION_V2]))
                 if response and len(response) > 17:
                     self.state.pcb_version = (
                         response[1:17].decode("utf-8", errors="ignore").rstrip("\x00")

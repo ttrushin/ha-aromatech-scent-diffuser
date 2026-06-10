@@ -5,13 +5,12 @@ from __future__ import annotations
 import logging
 
 from homeassistant.components.select import SelectEntity
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from . import AromaTechConfigEntry
 from .coordinator import AromaTechCoordinator
-from .core.const import DOMAIN
 from .core.entity import AromaTechEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -19,12 +18,11 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    config_entry: ConfigEntry,
+    config_entry: AromaTechConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up AromaTech select from a config entry."""
-    coordinator: AromaTechCoordinator = hass.data[DOMAIN][config_entry.entry_id]
-    async_add_entities([AromaTechIntensitySelect(coordinator)])
+    async_add_entities([AromaTechIntensitySelect(config_entry.runtime_data)])
 
 
 class AromaTechIntensitySelect(AromaTechEntity, SelectEntity):
