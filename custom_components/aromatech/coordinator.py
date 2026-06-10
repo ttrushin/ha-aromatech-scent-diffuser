@@ -56,6 +56,11 @@ _LOGGER = logging.getLogger(__name__)
 
 # Connection settings
 COMMAND_TIMEOUT = 5.0
+# Login response timeout, and how long to wait for a response to the
+# plain-password login before falling back to password+pair code.
+# The official app uses 500 ms for the fallback.
+LOGIN_TIMEOUT = 2.0
+LOGIN_FALLBACK_TIMEOUT = 0.5
 # Disconnect after 30 minutes of idle when device is OFF
 DISCONNECT_DELAY_OFF = 30 * 60  # 30 minutes in seconds
 # The device only advertises while it has no active connection, so an
@@ -113,6 +118,7 @@ class DeviceInfo:
         self.many_aroma: bool = False
         self.fan: bool = False
         self.max_grade: int = 5
+        self.limits_loaded: bool = False
         self.custom_on_min: int = 0
         self.custom_on_max: int = 0
         self.custom_off_min: int = 0
@@ -166,6 +172,8 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         ble_device: BLEDevice,
         password: str,
         health_check_interval: int = 0,
+        time_sync: bool = False,
+        login_uses_pair_code: bool | None = None,
     ) -> None:
         """Initialize the coordinator."""
         super().__init__(
@@ -206,6 +214,16 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         self.info = DeviceInfo()
         self.state = DeviceState()
         self._logged_in = False
+
+        # Whether the device's login expects the pair code suffix.
+        # Learned on first successful login and remembered so subsequent
+        # connects need exactly one login write (each write beeps).
+        self.login_uses_pair_code = login_uses_pair_code
+
+        # Clock sync is optional: every write makes the device beep, and the
+        # device clock only matters for on-device schedules
+        self._time_sync = time_sync
+        self._time_synced = False
 
         # Presence tracking
         self.last_seen: datetime | None = None
@@ -578,31 +596,57 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
             _LOGGER.error("Failed to write command: %s", err)
             return False
 
+    def _login_command(self, use_pair_code: bool) -> bytes:
+        """Build the login command, optionally suffixed with the pair code."""
+        suffix = PAIR_CODE if use_pair_code else ""
+        return bytes([CMD_LOGIN]) + (self._password + suffix).encode("utf-8")
+
     async def _async_login(self) -> bool:
-        """Authenticate with the device and collect post-login data burst."""
+        """Authenticate with the device and collect post-login data burst.
+
+        The device beeps on login, so once we know which login variant the
+        device expects (with or without the pair code suffix), we remember it
+        and send exactly one login write on subsequent connects - the same
+        single-beep behavior as the official app.
+        """
         # Prepare for data burst collection
         self._data_burst_responses = []
         self._collecting_data_burst = True
 
         try:
-            # Try login without pair code first (works for V2.0)
-            login_cmd = bytes([CMD_LOGIN]) + self._password.encode("utf-8")
-            response = await self._async_write_command(login_cmd, timeout=2.0)
+            if self.login_uses_pair_code is None:
+                # Protocol unknown: mimic the official app - plain password
+                # first (V2.0), short fallback to password+pair code (V3.0)
+                order = [False, True]
+            else:
+                # Known variant first; the other only as a safety net
+                order = [self.login_uses_pair_code, not self.login_uses_pair_code]
 
-            if not response:
-                # Retry with pair code for V3.0 devices
-                login_cmd_v3 = (
-                    bytes([CMD_LOGIN]) + (self._password + PAIR_CODE).encode("utf-8")
+            response = b""
+            used_pair_code = order[0]
+            for attempt, use_pair_code in enumerate(order):
+                timeout = (
+                    LOGIN_FALLBACK_TIMEOUT
+                    if self.login_uses_pair_code is None and attempt == 0
+                    else LOGIN_TIMEOUT
                 )
-                response = await self._async_write_command(login_cmd_v3, timeout=2.0)
+                response = await self._async_write_command(
+                    self._login_command(use_pair_code), timeout=timeout
+                )
+                if response:
+                    used_pair_code = use_pair_code
+                    break
 
             if response and len(response) > 0 and response[0] == CMD_LOGIN:
                 login_state = self._parse_login_response(response)
                 self._logged_in = login_state == 0
 
                 if self._logged_in:
+                    self.login_uses_pair_code = used_pair_code
                     _LOGGER.debug(
-                        "Logged in successfully. Protocol version: %s",
+                        "Logged in successfully (pair code: %s). "
+                        "Protocol version: %s",
+                        used_pair_code,
                         self.info.blue_version,
                     )
 
@@ -614,8 +658,11 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
                     self._collecting_data_burst = False
                     self._parse_data_burst()
 
-                    # Send current time after collecting data
-                    await self._async_send_time()
+                    # Optionally sync the device clock (once per HA session).
+                    # Only needed for on-device schedules, and it costs a beep.
+                    if self._time_sync and not self._time_synced:
+                        await self._async_send_time()
+                        self._time_synced = True
                     return True
 
             _LOGGER.error("Login failed")
@@ -785,6 +832,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
             self.info.custom_on_max = (data[4] << 8) + data[5]
             self.info.custom_off_min = (data[6] << 8) + data[7]
             self.info.custom_off_max = (data[8] << 8) + data[9]
+            self.info.limits_loaded = True
             _LOGGER.debug("Parsed limits: max_grade=%d", self.info.max_grade)
 
     def _parse_schedule_v3(self, data: bytes) -> None:
@@ -860,6 +908,11 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         if index == 1:
             self.state.is_on = enabled
             self.state.intensity = schedule.intensity if schedule.intensity > 0 else 1
+
+            # Byte 8 of slot 1 carries the max intensity grade
+            if len(data) > 8 and data[8] > 0:
+                self.info.max_grade = data[8]
+                self.info.limits_loaded = True
 
             # Parse embedded oil info from slot 1 (if present)
             if len(data) > 14:
@@ -1012,12 +1065,18 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
 
         async def _power_on() -> None:
             if self.info.blue_version >= 3.0:
-                control = 0x03  # fan=1, fog=1
-                cmd = bytes([
-                    CMD_SCHEDULE_WRITE_V3, DEFAULT_AROMA_SLOT, 0x02, control, 0x00
-                ])
-                await self._async_write_command_no_response(cmd)
-                await self._async_set_intensity_v3(intensity)
+                if intensity == self.state.intensity:
+                    # Single 5-byte total-control write, exactly like the
+                    # app's power toggle - doesn't touch schedule slots
+                    control = 0x03  # fan=1, fog=1
+                    cmd = bytes([
+                        CMD_SCHEDULE_WRITE_V3, DEFAULT_AROMA_SLOT, 0x02, control, 0x00
+                    ])
+                    await self._async_write_command_no_response(cmd)
+                else:
+                    # The 14-byte schedule write carries both the power bits
+                    # and the new intensity, so one write covers everything
+                    await self._async_set_intensity_v3(intensity)
             else:
                 await self._async_set_schedule_v2(enabled=True, intensity=intensity)
 
@@ -1089,7 +1148,10 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         cmd[12] = 0  # custom_intensity flag
         cmd[13] = intensity
 
-        await self._async_write_command(bytes(cmd))
+        # The app doesn't wait for a response to control writes; the device
+        # pushes updated 0x4A state frames which the notification handler
+        # parses as authoritative state
+        await self._async_write_command_no_response(bytes(cmd))
 
     async def _async_set_schedule_v2(
         self, enabled: bool, intensity: int = 1, index: int = 1
@@ -1108,7 +1170,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         cmd[6] = repeat_byte
         cmd[7] = intensity
 
-        await self._async_write_command(bytes(cmd))
+        await self._async_write_command_no_response(bytes(cmd))
 
     async def async_initialize(self) -> None:
         """Connect, log in, and load initial device state.
@@ -1151,8 +1213,8 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
                         response[17:].decode("utf-8", errors="ignore").rstrip("\x00")
                     )
 
-            # Read limits if not already populated from data burst
-            if self.info.max_grade == 5:  # Default value, may not be set
+            # Read limits only if the data burst didn't deliver them
+            if not self.info.limits_loaded:
                 await self._async_read_limits()
 
         await self.async_execute_command(_read_info)
@@ -1163,8 +1225,9 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
             response = await self._async_write_command(bytes([CMD_LIMITS_V3]))
             if response and response[0] == RESP_LIMITS_V3 and len(response) > 1:
                 self.info.max_grade = response[1]
+                self.info.limits_loaded = True
         else:
             response = await self._async_write_command(bytes([CMD_LIMITS_V2]))
             if response and response[0] == RESP_LIMITS_V2:
                 # V2.0 doesn't return max_grade in limits, keep default
-                pass
+                self.info.limits_loaded = True

@@ -14,8 +14,11 @@ from homeassistant.helpers.update_coordinator import UpdateFailed
 from .coordinator import AromaTechCoordinator
 from .core.const import (
     CONF_HEALTH_CHECK_INTERVAL,
+    CONF_TIME_SYNC,
+    CONF_USES_PAIR_CODE,
     DEFAULT_HEALTH_CHECK_INTERVAL,
     DEFAULT_PASSWORD,
+    DEFAULT_TIME_SYNC,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -52,6 +55,8 @@ async def async_setup_entry(
         health_check_interval=entry.options.get(
             CONF_HEALTH_CHECK_INTERVAL, DEFAULT_HEALTH_CHECK_INTERVAL
         ),
+        time_sync=entry.options.get(CONF_TIME_SYNC, DEFAULT_TIME_SYNC),
+        login_uses_pair_code=entry.data.get(CONF_USES_PAIR_CODE),
     )
 
     # Seed presence info from the most recent advertisement
@@ -74,6 +79,14 @@ async def async_setup_entry(
         coordinator.device_name or coordinator.mac,
         coordinator.info.blue_version,
     )
+
+    # Remember which login variant the device accepted so future setups
+    # need a single login write (the device beeps on every write)
+    if entry.data.get(CONF_USES_PAIR_CODE) != coordinator.login_uses_pair_code:
+        hass.config_entries.async_update_entry(
+            entry,
+            data={**entry.data, CONF_USES_PAIR_CODE: coordinator.login_uses_pair_code},
+        )
 
     entry.runtime_data = coordinator
 

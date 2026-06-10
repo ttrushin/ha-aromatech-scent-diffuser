@@ -78,3 +78,8 @@ DATA_BURST_TIMEOUT = 1.5
 # Options
 CONF_HEALTH_CHECK_INTERVAL = "health_check_interval"
 DEFAULT_HEALTH_CHECK_INTERVAL = 0  # 0 = disabled
+CONF_TIME_SYNC = "time_sync"
+DEFAULT_TIME_SYNC = False
+
+# Learned device facts persisted in the config entry
+CONF_USES_PAIR_CODE = "uses_pair_code"

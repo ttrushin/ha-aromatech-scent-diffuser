@@ -15,6 +15,7 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_MAC, CONF_PASSWORD
 from homeassistant.core import callback
 from homeassistant.helpers.selector import (
+    BooleanSelector,
     NumberSelector,
     NumberSelectorConfig,
     NumberSelectorMode,
@@ -22,8 +23,10 @@ from homeassistant.helpers.selector import (
 
 from .core.const import (
     CONF_HEALTH_CHECK_INTERVAL,
+    CONF_TIME_SYNC,
     DEFAULT_HEALTH_CHECK_INTERVAL,
     DEFAULT_PASSWORD,
+    DEFAULT_TIME_SYNC,
     DEVICE_NAME_PATTERNS,
     DOMAIN,
     MANUFACTURER_ID,
@@ -186,7 +189,8 @@ class AromaTechOptionsFlow(OptionsFlowWithReload):
                 data={
                     CONF_HEALTH_CHECK_INTERVAL: int(
                         user_input[CONF_HEALTH_CHECK_INTERVAL]
-                    )
+                    ),
+                    CONF_TIME_SYNC: user_input[CONF_TIME_SYNC],
                 }
             )
 
@@ -209,6 +213,12 @@ class AromaTechOptionsFlow(OptionsFlowWithReload):
                             unit_of_measurement="s",
                         )
                     ),
+                    vol.Required(
+                        CONF_TIME_SYNC,
+                        default=self.config_entry.options.get(
+                            CONF_TIME_SYNC, DEFAULT_TIME_SYNC
+                        ),
+                    ): BooleanSelector(),
                 }
             ),
         )

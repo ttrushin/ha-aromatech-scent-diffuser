@@ -32,10 +32,12 @@
       "init": {
         "title": "AromaTech Options",
         "data": {
-          "health_check_interval": "Connection health check interval (seconds)"
+          "health_check_interval": "Connection health check interval (seconds)",
+          "time_sync": "Sync device clock on connect"
         },
         "data_description": {
-          "health_check_interval": "How often to probe the Bluetooth connection and reconnect if it has silently died. Set to 0 to disable (recommended unless you see stale connections; advertisements already trigger reconnects)."
+          "health_check_interval": "How often to probe the Bluetooth connection and reconnect if it has silently died. Set to 0 to disable (recommended unless you see stale connections; advertisements already trigger reconnects). Note: each probe makes the device beep.",
+          "time_sync": "Write the current time to the device once per Home Assistant session. Only needed if you use schedules configured in the mobile app - and it costs one extra beep per session."
         }
       }
     }

@@ -97,6 +97,20 @@ After setup, click **Configure** on the integration entry to access options:
   probe the Bluetooth connection and reconnect if it has silently died.
   Defaults to `0` (disabled). Advertisement-based reconnection already covers
   most cases, so only enable this if you see the connection getting stuck.
+  Note: each probe write makes the device beep.
+- **Sync device clock on connect**: Writes the current time to the device
+  once per Home Assistant session. Off by default - the device clock only
+  matters if you use schedules configured in the mobile app, and every write
+  makes the device beep.
+
+### A note on beeping
+
+The diffuser beeps when it receives Bluetooth writes - there is no
+protocol-level way to silence it (the official app has none either). This
+integration minimizes writes to match the app's behavior: it remembers which
+login variant your device expects (one login write per connect instead of
+two), skips the clock write by default, and uses single-write power/intensity
+commands.
 
 ## Entities
 
