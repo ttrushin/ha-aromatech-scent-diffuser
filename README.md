@@ -23,7 +23,17 @@ so please open an issue and contribute a PR if you find any issues.
 - **Power Control**: Turn your diffuser on and off
 - **Intensity Adjustment**: Set fragrance intensity (1-5 levels, device
   dependent)
-- **Auto-Discovery**: Automatically detects nearby AromaTech diffusers
+- **Sensors**: Oil level, battery level, signal strength, and connection
+  status (where supported by the device)
+- **Auto-Discovery**: Home Assistant automatically discovers nearby AromaTech
+  diffusers and offers to set them up
+- **Automatic Reconnection**: If the Bluetooth connection drops, the
+  integration reconnects as soon as the device starts advertising again
+  (these diffusers only advertise while disconnected, so an advertisement
+  doubles as a "reconnect now" signal). An optional periodic connection
+  health check can be enabled in the integration options.
+- **Live State Updates**: Changes made via the mobile app or the device's
+  physical controls are reflected in Home Assistant while connected
 - **Protocol Support**: Compatible with both V2.0 and V3.0 AromaTech protocols
 
 ## Supported Devices
@@ -64,12 +74,29 @@ including:
 
 ## Configuration
 
+### Automatic discovery
+
+If a supported diffuser is in Bluetooth range, Home Assistant will show it as
+a discovered device under **Settings** > **Devices & Services**. Click
+**Configure**, enter the device password (default: `8888`), and submit.
+
+### Manual setup
+
 1. Go to **Settings** > **Devices & Services** > **Integrations**
 2. Click **+ Add Integration**
 3. Search for "AromaTech Scent Diffuser"
 4. Select your diffuser from the list of discovered devices
 5. Enter the device password (default: `8888`)
 6. Click **Submit**
+
+### Options
+
+After setup, click **Configure** on the integration entry to access options:
+
+- **Connection health check interval**: How often (in seconds) to actively
+  probe the Bluetooth connection and reconnect if it has silently died.
+  Defaults to `0` (disabled). Advertisement-based reconnection already covers
+  most cases, so only enable this if you see the connection getting stuck.
 
 ## Entities
 
@@ -88,6 +115,20 @@ Controls the fragrance intensity level.
 
 - **Entity**: `select.<device_name>_intensity`
 - **Options**: 1 through max intensity (typically 5)
+
+### Sensors
+
+- **Oil level** (`sensor.<device_name>_oil_level`): Remaining oil percentage,
+  one sensor per aroma slot (only on devices that report oil capacity)
+- **Battery** (`sensor.<device_name>_battery`): Battery level (only on
+  battery-equipped devices)
+- **Signal strength** (`sensor.<device_name>_signal_strength`): Bluetooth
+  RSSI, diagnostic, disabled by default
+- **Connectivity** (`binary_sensor.<device_name>_connectivity`): Whether Home
+  Assistant currently holds a Bluetooth connection to the diffuser
+
+Entities become **unavailable** when the device is truly unreachable (not
+connected and not seen advertising by any Bluetooth scanner).
 
 ## State Attributes
 
@@ -180,16 +221,29 @@ automation:
 
 ### Control not responding
 
-- Check the `rssi` attribute to verify signal strength
+- Check the `rssi` attribute (or enable the Signal strength sensor) to verify
+  signal strength
 - Ensure the diffuser is still in range
+- Note that these diffusers only accept **one** Bluetooth connection at a
+  time - if the mobile app is connected, Home Assistant cannot connect (and
+  vice versa)
 - Try power cycling the diffuser
 - Check Home Assistant logs for errors
+
+### Connection keeps dropping or getting stuck
+
+- The integration reconnects automatically as soon as the device is seen
+  advertising again
+- If the connection regularly dies *silently* (stale connection that never
+  recovers), enable the **connection health check** in the integration
+  options
+- A Bluetooth Proxy close to the diffuser dramatically improves reliability
 
 ## Technical Details
 
 - **Communication**: Bluetooth Low Energy (BLE)
 - **Protocol**: Supports AromaTech V2.0 and V3.0 protocols
-- **IoT Class**: Local Polling
+- **IoT Class**: Local Push
 - **Dependencies**: Home Assistant Bluetooth component
 
 ## License
