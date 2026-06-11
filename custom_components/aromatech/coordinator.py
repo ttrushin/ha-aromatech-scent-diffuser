@@ -28,7 +28,8 @@ from .core.const import (
     CMD_TIME_V2,
     CMD_TIME_V3,
     CMD_VERSION_V2,
-    DATA_BURST_TIMEOUT,
+    DATA_BURST_MAX_WAIT,
+    DATA_BURST_QUIET,
     DEFAULT_AROMA_SLOT,
     DEFAULT_INTENSITY,
     PAIR_CODE,
@@ -209,6 +210,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         # Data burst collection state (for post-login data collection)
         self._collecting_data_burst = False
         self._data_burst_responses: list[bytes] = []
+        self._burst_frame_event = asyncio.Event()
 
         # Device state
         self.info = DeviceInfo()
@@ -392,6 +394,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         # Collect responses during data burst phase
         if self._collecting_data_burst:
             self._data_burst_responses.append(data)
+            self._burst_frame_event.set()
             return
 
         # Notifications outside a pending command are pushed by the device
@@ -657,9 +660,19 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
                         self.info.blue_version,
                     )
 
-                    # Wait for post-login data burst from device
-                    # The device automatically sends all state data after login
-                    await asyncio.sleep(DATA_BURST_TIMEOUT)
+                    # The device streams all state data after login. Collect
+                    # adaptively: done after a quiet gap, capped at a maximum.
+                    # (V2.0 devices send no burst and exit on the first gap.)
+                    deadline = self.hass.loop.time() + DATA_BURST_MAX_WAIT
+                    while self.hass.loop.time() < deadline:
+                        self._burst_frame_event.clear()
+                        try:
+                            await asyncio.wait_for(
+                                self._burst_frame_event.wait(),
+                                timeout=DATA_BURST_QUIET,
+                            )
+                        except asyncio.TimeoutError:
+                            break  # burst went quiet - collection complete
 
                     # Stop collecting and parse the data burst
                     self._collecting_data_burst = False
@@ -1155,9 +1168,8 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         cmd[12] = 0  # custom_intensity flag
         cmd[13] = intensity
 
-        # The app doesn't wait for a response to control writes; the device
-        # pushes updated 0x4A state frames which the notification handler
-        # parses as authoritative state
+        # Control writes get no confirmation from the device (verified
+        # empirically), so don't wait for one - the app doesn't either
         await self._async_write_command_no_response(bytes(cmd))
 
     async def _async_set_schedule_v2(

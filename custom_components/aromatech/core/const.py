@@ -72,8 +72,12 @@ PAIR_CODE = "OK01"
 DEFAULT_AROMA_SLOT = 1
 DEFAULT_INTENSITY = 1
 
-# Post-login data burst collection timeout (seconds)
-DATA_BURST_TIMEOUT = 1.5
+# Post-login data burst collection (seconds). The device streams ~20 frames
+# in ~1.1s (measured; longer through proxies); V2.0 devices send no burst.
+# Collection ends after DATA_BURST_QUIET of silence, capped at
+# DATA_BURST_MAX_WAIT total.
+DATA_BURST_QUIET = 0.4
+DATA_BURST_MAX_WAIT = 3.0
 
 # Options
 CONF_HEALTH_CHECK_INTERVAL = "health_check_interval"

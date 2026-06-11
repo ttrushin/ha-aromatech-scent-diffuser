@@ -111,11 +111,12 @@ Determined empirically: connections, disconnections, GATT reads, and writes
 the device ignores (like the pair-code-less login probe on V3 devices) are
 silent; every accepted write beeps regardless of write type.
 
-This integration therefore minimizes writes to match the app's behavior: it
-remembers which login variant your device expects (one login write per
-connect instead of two), skips the clock write by default, and uses
-single-write power/intensity commands. Expect one beep per (re)connect and
-one per command, exactly like the official app.
+This integration therefore minimizes writes: it remembers which login
+variant your device expects (one login write per connect instead of two),
+skips the clock write by default, and uses single-write power/intensity
+commands. Expect one beep per (re)connect and one per command - one beep
+*fewer* per connect than the official app, whose post-login clock write
+also beeps.
 
 ## Entities
 
