@@ -202,6 +202,7 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         self._connecting = False
         self._connected_at: float = 0.0
         self._expected_disconnect = False
+        self._last_connect_error: Exception | None = None
 
         # Reconnection state (for when device is ON and connection drops)
         self._reconnect_task: asyncio.Task | None = None
@@ -538,7 +539,12 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
             return True
 
         except (BleakError, asyncio.TimeoutError) as err:
-            _LOGGER.error("Failed to connect to %s: %s", self._ble_device.address, err)
+            # Transient GATT errors (e.g. error 133) are common, especially
+            # right after HA startup - callers retry, so don't log as error
+            _LOGGER.warning(
+                "Failed to connect to %s: %s", self._ble_device.address, err
+            )
+            self._last_connect_error = err
             await self._async_disconnect_internal()
             return False
 
@@ -1065,7 +1071,10 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
         """
         async with self._connection_lock:
             if not await self._async_ensure_connected():
-                raise UpdateFailed("Failed to connect to device")
+                raise UpdateFailed(
+                    f"Failed to connect to {self._ble_device.address}: "
+                    f"{self._last_connect_error or 'login failed'}"
+                )
 
             try:
                 await command()
