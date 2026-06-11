@@ -361,17 +361,24 @@ class AromaTechCoordinator(DataUpdateCoordinator[None]):
             return
 
         async with self._connection_lock:
-            if self.connected:
-                # Probe the connection with a harmless read; no response
-                # within the timeout means the link is dead.
-                response = await self._async_write_command(bytes([CMD_READ_NAME]))
-                if response:
+            if self.connected and self._client is not None:
+                # Probe with a GATT read: it forces an ATT response from the
+                # device, so a dead link fails it - and unlike command writes
+                # it doesn't make the device beep.
+                try:
+                    await asyncio.wait_for(
+                        self._client.read_gatt_char(CHARACTERISTIC_UUID),
+                        timeout=COMMAND_TIMEOUT,
+                    )
                     return
-                _LOGGER.warning(
-                    "Health check probe to %s failed - connection is stale",
-                    self._ble_device.address,
-                )
-                await self._async_disconnect_internal()
+                except (BleakError, asyncio.TimeoutError) as err:
+                    _LOGGER.warning(
+                        "Health check read on %s failed (%s) - connection "
+                        "is stale",
+                        self._ble_device.address,
+                        err,
+                    )
+                    await self._async_disconnect_internal()
 
             if self.state.is_on and await self._async_ensure_connected():
                 self._schedule_disconnect()
