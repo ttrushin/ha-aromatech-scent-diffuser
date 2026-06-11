@@ -16,6 +16,9 @@ communication by decompiling the APK and studying the code. I have tested this
 heavily with my own device, but don't have a "protocol 2.0" device to test with,
 so please open an issue and contribute a PR if you find any issues.
 
+> Disclosure: On June 10th, 2026, I used Claude Code to enhance multiple aspects
+> of this component with various tests against my device.
+
 ## Features
 
 - **Local Control**: Direct Bluetooth communication with no cloud dependencies
@@ -23,15 +26,15 @@ so please open an issue and contribute a PR if you find any issues.
 - **Power Control**: Turn your diffuser on and off
 - **Intensity Adjustment**: Set fragrance intensity (1-5 levels, device
   dependent)
-- **Sensors**: Oil level, battery level, signal strength, and connection
-  status (where supported by the device)
+- **Sensors**: Oil level, battery level, signal strength, and connection status
+  (where supported by the device)
 - **Auto-Discovery**: Home Assistant automatically discovers nearby AromaTech
   diffusers and offers to set them up
-- **Automatic Reconnection**: If the Bluetooth connection drops, the
-  integration reconnects as soon as the device starts advertising again
-  (these diffusers only advertise while disconnected, so an advertisement
-  doubles as a "reconnect now" signal). An optional periodic connection
-  health check can be enabled in the integration options.
+- **Automatic Reconnection**: If the Bluetooth connection drops, the integration
+  reconnects as soon as the device starts advertising again (these diffusers
+  only advertise while disconnected, so an advertisement doubles as a "reconnect
+  now" signal). An optional periodic connection health check can be enabled in
+  the integration options.
 - **Live State Updates**: Changes made via the mobile app or the device's
   physical controls are reflected in Home Assistant while connected
 - **Protocol Support**: Compatible with both V2.0 and V3.0 AromaTech protocols
@@ -76,8 +79,8 @@ including:
 
 ### Automatic discovery
 
-If a supported diffuser is in Bluetooth range, Home Assistant will show it as
-a discovered device under **Settings** > **Devices & Services**. Click
+If a supported diffuser is in Bluetooth range, Home Assistant will show it as a
+discovered device under **Settings** > **Devices & Services**. Click
 **Configure**, enter the device password (default: `8888`), and submit.
 
 ### Manual setup
@@ -93,30 +96,29 @@ a discovered device under **Settings** > **Devices & Services**. Click
 
 After setup, click **Configure** on the integration entry to access options:
 
-- **Connection health check interval**: How often (in seconds) to actively
-  probe the Bluetooth connection and reconnect if it has silently died.
-  Defaults to `0` (disabled). Advertisement-based reconnection already covers
-  most cases, so only enable this if you see the connection getting stuck.
-  The probe is a GATT read, which does not make the device beep.
-- **Sync device clock on connect**: Writes the current time to the device
-  once per Home Assistant session. Off by default - the device clock only
-  matters if you use schedules configured in the mobile app, and every write
-  makes the device beep.
+- **Connection health check interval**: How often (in seconds) to actively probe
+  the Bluetooth connection and reconnect if it has silently died. Defaults to
+  `0` (disabled). Advertisement-based reconnection already covers most cases, so
+  only enable this if you see the connection getting stuck. The probe is a GATT
+  read, which does not make the device beep.
+- **Sync device clock on connect**: Writes the current time to the device once
+  per Home Assistant session. Off by default - the device clock only matters if
+  you use schedules configured in the mobile app, and every write makes the
+  device beep.
 
 ### A note on beeping
 
-The diffuser beeps once for every Bluetooth command write it accepts - there
-is no protocol-level way to silence it (the official app has none either).
-Determined empirically: connections, disconnections, GATT reads, and writes
-the device ignores (like the pair-code-less login probe on V3 devices) are
-silent; every accepted write beeps regardless of write type.
+The diffuser beeps once for every Bluetooth command write it accepts - there is
+no protocol-level way to silence it (the official app has none either).
+Determined empirically: connections, disconnections, GATT reads, and writes the
+device ignores (like the pair-code-less login probe on V3 devices) are silent;
+every accepted write beeps regardless of write type.
 
-This integration therefore minimizes writes: it remembers which login
-variant your device expects (one login write per connect instead of two),
-skips the clock write by default, and uses single-write power/intensity
-commands. Expect one beep per (re)connect and one per command - one beep
-*fewer* per connect than the official app, whose post-login clock write
-also beeps.
+This integration therefore minimizes writes: it remembers which login variant
+your device expects (one login write per connect instead of two), skips the
+clock write by default, and uses single-write power/intensity commands. Expect
+one beep per (re)connect and one per command - one beep _fewer_ per connect than
+the official app, whose post-login clock write also beeps.
 
 ## Entities
 
@@ -142,8 +144,8 @@ Controls the fragrance intensity level.
   one sensor per aroma slot (only on devices that report oil capacity)
 - **Battery** (`sensor.<device_name>_battery`): Battery level (only on
   battery-equipped devices)
-- **Signal strength** (`sensor.<device_name>_signal_strength`): Bluetooth
-  RSSI, diagnostic, disabled by default
+- **Signal strength** (`sensor.<device_name>_signal_strength`): Bluetooth RSSI,
+  diagnostic, disabled by default
 - **Connectivity** (`binary_sensor.<device_name>_connectivity`): Whether Home
   Assistant currently holds a Bluetooth connection to the diffuser
 
@@ -154,26 +156,26 @@ connected and not seen advertising by any Bluetooth scanner).
 
 The power switch entity exposes additional attributes:
 
-| Attribute                   | Description                                      |
-| --------------------------- | ------------------------------------------------ |
-| `device_name`               | Bluetooth device name                            |
-| `product_name`              | Product model (e.g., "AROMINI BT PLUS")          |
-| `protocol_version`          | Protocol version (V2.0 or V3.0)                  |
-| `connected`                 | Current connection state                         |
-| `current_intensity`         | Current intensity setting (1-5)                  |
-| `max_intensity`             | Maximum supported intensity                      |
-| `fan_on`                    | Fan power state                                  |
-| `oil_support`               | Device supports oil level tracking               |
-| `battery_support`           | Device has battery                               |
-| `oil_name`                  | Name of the loaded oil/fragrance                 |
-| `oil_total`                 | Total oil capacity                               |
-| `oil_remaining`             | Remaining oil amount                             |
-| `oil_percentage`            | Oil remaining percentage                         |
-| `battery_level`             | Battery level (if supported)                     |
-| `pcb_version`               | PCB firmware version                             |
-| `equipment_version`         | Equipment firmware version                       |
-| `rssi`                      | Bluetooth signal strength                        |
-| `last_seen`                 | Last communication timestamp                     |
+| Attribute           | Description                             |
+| ------------------- | --------------------------------------- |
+| `device_name`       | Bluetooth device name                   |
+| `product_name`      | Product model (e.g., "AROMINI BT PLUS") |
+| `protocol_version`  | Protocol version (V2.0 or V3.0)         |
+| `connected`         | Current connection state                |
+| `current_intensity` | Current intensity setting (1-5)         |
+| `max_intensity`     | Maximum supported intensity             |
+| `fan_on`            | Fan power state                         |
+| `oil_support`       | Device supports oil level tracking      |
+| `battery_support`   | Device has battery                      |
+| `oil_name`          | Name of the loaded oil/fragrance        |
+| `oil_total`         | Total oil capacity                      |
+| `oil_remaining`     | Remaining oil amount                    |
+| `oil_percentage`    | Oil remaining percentage                |
+| `battery_level`     | Battery level (if supported)            |
+| `pcb_version`       | PCB firmware version                    |
+| `equipment_version` | Equipment firmware version              |
+| `rssi`              | Bluetooth signal strength               |
+| `last_seen`         | Last communication timestamp            |
 
 Note: Multi-aroma devices will have numbered oil attributes (e.g., `oil_1_name`,
 `oil_2_name`, etc.).
@@ -184,41 +186,41 @@ Note: Multi-aroma devices will have numbered oil attributes (e.g., `oil_1_name`,
 
 ```yaml
 automation:
-    - alias: "Evening Scent"
-      trigger:
-          - platform: sun
-            event: sunset
-      action:
-          - service: switch.turn_on
-            target:
-                entity_id: switch.living_room_diffuser_power
+  - alias: "Evening Scent"
+    trigger:
+      - platform: sun
+        event: sunset
+    action:
+      - service: switch.turn_on
+        target:
+          entity_id: switch.living_room_diffuser_power
 ```
 
 ### Adjust intensity by time of day
 
 ```yaml
 automation:
-    - alias: "Morning Intensity"
-      trigger:
-          - platform: time
-            at: "07:00:00"
-      action:
-          - service: select.select_option
-            target:
-                entity_id: select.living_room_diffuser_intensity
-            data:
-                option: "5"
+  - alias: "Morning Intensity"
+    trigger:
+      - platform: time
+        at: "07:00:00"
+    action:
+      - service: select.select_option
+        target:
+          entity_id: select.living_room_diffuser_intensity
+        data:
+          option: "5"
 
-    - alias: "Evening Intensity"
-      trigger:
-          - platform: time
-            at: "20:00:00"
-      action:
-          - service: select.select_option
-            target:
-                entity_id: select.living_room_diffuser_intensity
-            data:
-                option: "2"
+  - alias: "Evening Intensity"
+    trigger:
+      - platform: time
+        at: "20:00:00"
+    action:
+      - service: select.select_option
+        target:
+          entity_id: select.living_room_diffuser_intensity
+        data:
+          option: "2"
 ```
 
 ## Troubleshooting
@@ -244,9 +246,8 @@ automation:
 - Check the `rssi` attribute (or enable the Signal strength sensor) to verify
   signal strength
 - Ensure the diffuser is still in range
-- Note that these diffusers only accept **one** Bluetooth connection at a
-  time - if the mobile app is connected, Home Assistant cannot connect (and
-  vice versa)
+- Note that these diffusers only accept **one** Bluetooth connection at a time -
+  if the mobile app is connected, Home Assistant cannot connect (and vice versa)
 - Try power cycling the diffuser
 - Check Home Assistant logs for errors
 
@@ -254,9 +255,8 @@ automation:
 
 - The integration reconnects automatically as soon as the device is seen
   advertising again
-- If the connection regularly dies *silently* (stale connection that never
-  recovers), enable the **connection health check** in the integration
-  options
+- If the connection regularly dies _silently_ (stale connection that never
+  recovers), enable the **connection health check** in the integration options
 - A Bluetooth Proxy close to the diffuser dramatically improves reliability
 
 ## Technical Details
